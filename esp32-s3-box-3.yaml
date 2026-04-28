@@ -12,6 +12,21 @@ substitutions:
   voice_assist_muted_phase_id: "12"
   voice_assist_timer_finished_phase_id: "20"
 
+  # App state — used when no voice phase is active
+  app_voice: "0"
+  app_pomodoro: "1"
+  app_count: "2"
+
+  # Pomodoro state machine
+  pomodoro_idle: "0"
+  pomodoro_focus: "1"
+  pomodoro_short_break: "2"
+  pomodoro_long_break: "3"
+  pomodoro_focus_seconds: "1500"   # 25 min
+  pomodoro_short_seconds: "300"    # 5 min
+  pomodoro_long_seconds: "900"     # 15 min
+  pomodoro_cycles_before_long: "4"
+
   # These unique characters have been extracted from every test file of every language available on https://github.com/home-assistant/intents (14 March 2024)
   # However, the Figtree font only contains Latin characters, so there is no point using this... unlessyou change the font configuration accordingly.
   allowed_characters: " !#%'()+,-./0123456789:;<>?@ABCDEFGHIJKLMNOPQRSTUVWYZ[]_abcdefghijklmnopqrstuvwxyz{|}°²³µ¿ÁÂÄÅÉÖÚßàáâãäåæçèéêëìíîðñòóôõöøùúûüýþāăąćčďĐđēėęěğĮįıļľŁłńňőřśšťũūůűųźŻżŽžơưșțΆΈΌΐΑΒΓΔΕΖΗΘΚΜΝΠΡΣΤΥΦάέήίαβγδεζηθικλμνξοπρςστυφχψωϊόύώАБВГДЕЖЗИКЛМНОПРСТУХЦЧШЪЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюяёђєіїјљњћאבגדהוזחטיכלםמןנסעפץצקרשת،ءآأإئابةتجحخدذرزسشصضطظعغفقكلمنهوىيٹپچڈکگںھہیےংকচতধনফবযরলশষস়ািু্చయలిెొ్ംഅആഇഈഉഎഓകഗങചജഞടഡണതദധനപഫബഭമയരറലളവശസഹാിീുൂെേൈ്ൺൻർൽൾაბგდევზთილმნოპრსტუფქყშჩცძჭხạảấầẩậắặẹẽếềểệỉịọỏốồổỗộớờởợụủứừửữựỳ—、一上不个中为主乾了些亮人任低佔何作供依侧係個側偵充光入全关冇冷几切到制前動區卧厅厨及口另右吊后吗启吸呀咗哪唔問啟嗎嘅嘛器圍在场執場外多大始安定客室家密寵对將小少左已帘常幫幾库度庫廊廚廳开式後恆感態成我戲戶户房所扇手打执把拔换掉控插摄整斯新明是景暗更最會有未本模機檯櫃欄次正氏水沒没洗活派温測源溫漏潮激濕灯為無煙照熱燈燥物狀玄现現瓦用發的盞目着睡私空窗立笛管節簾籬紅線红罐置聚聲脚腦腳臥色节著行衣解設調請謝警设调走路車车运連遊運過道邊部都量鎖锁門閂閉開關门闭除隱離電震霧面音頂題顏颜風风食餅餵가간감갔강개거게겨결경고공과관그금급기길깥꺼껐꼽나난내네놀누는능니다닫담대더데도동됐되된됨둡드든등디때떤뜨라래러렇렌려로료른를리림링마많명몇모무문물뭐바밝방배변보부불블빨뽑사산상색서설성세센션소쇼수스습시신실싱아안않알았애야어얼업없었에여연열옆오온완외왼요운움워원위으은을음의이인일임입있작잠장재전절정제져조족종주줄중줘지직진짐쪽차창천최추출충치침커컴켜켰쿠크키탁탄태탬터텔통트튼티파팬퍼폰표퓨플핑한함해했행혀현화활후휴힘，？"
@@ -84,6 +99,16 @@ button:
   - platform: factory_reset
     id: factory_reset_btn
     internal: true
+  - platform: template
+    name: "Start Pomodoro"
+    icon: "mdi:timer-play-outline"
+    on_press:
+      - script.execute: start_pomodoro
+  - platform: template
+    name: "Stop Pomodoro"
+    icon: "mdi:timer-cancel-outline"
+    on_press:
+      - script.execute: stop_pomodoro
 
 binary_sensor:
   - platform: gpio
@@ -133,6 +158,34 @@ i2c:
   - id: i2c_adc_dac
     scl: GPIO18
     sda: GPIO8
+
+touchscreen:
+  - platform: gt911
+    i2c_id: i2c_adc_dac
+    id: box_touch
+    interrupt_pin: GPIO3
+    on_touch:
+      - lambda: |-
+          uint32_t now = millis();
+          if (now - id(last_touch_ms) < 350) return;  // debounce
+          id(last_touch_ms) = now;
+          int x = touch.x;
+          int y = touch.y;
+          // Tab strip area at top: cycle apps
+          if (y < 30) {
+            id(app_state) = (id(app_state) + 1) % ${app_count};
+            id(draw_display).execute();
+            return;
+          }
+          // App-specific tap actions
+          if (id(app_state) == ${app_pomodoro}) {
+            // Tap center: start, pause, or resume
+            if (id(pomodoro_state) == ${pomodoro_idle}) {
+              id(start_pomodoro).execute();
+            } else {
+              id(stop_pomodoro).execute();
+            }
+          }
 
 i2s_audio:
   - id: i2s_audio_bus
@@ -379,7 +432,11 @@ script:
                                 id(s3_box_lcd).update();
                                 break;
                               default:
-                                id(s3_box_lcd).show_page(idle_page);
+                                if (id(app_state) == ${app_pomodoro}) {
+                                  id(s3_box_lcd).show_page(pomodoro_page);
+                                } else {
+                                  id(s3_box_lcd).show_page(idle_page);
+                                }
                                 id(s3_box_lcd).update();
                             }
                       else:
@@ -527,6 +584,50 @@ script:
           else:
             - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
 
+  # ----- Pomodoro -----
+  - id: start_pomodoro
+    then:
+      - lambda: |-
+          id(pomodoro_state) = ${pomodoro_focus};
+          id(pomodoro_remaining) = ${pomodoro_focus_seconds};
+          id(pomodoro_focus_count) = 0;
+          id(app_state) = ${app_pomodoro};
+      - script.execute: draw_display
+  - id: stop_pomodoro
+    then:
+      - lambda: |-
+          id(pomodoro_state) = ${pomodoro_idle};
+          id(pomodoro_remaining) = 0;
+          id(pomodoro_focus_count) = 0;
+      - script.execute: draw_display
+  - id: advance_pomodoro
+    then:
+      - lambda: |-
+          // End of current phase — transition.
+          if (id(pomodoro_state) == ${pomodoro_focus}) {
+            id(pomodoro_focus_count) += 1;
+            if (id(pomodoro_focus_count) >= ${pomodoro_cycles_before_long}) {
+              id(pomodoro_state) = ${pomodoro_long_break};
+              id(pomodoro_remaining) = ${pomodoro_long_seconds};
+            } else {
+              id(pomodoro_state) = ${pomodoro_short_break};
+              id(pomodoro_remaining) = ${pomodoro_short_seconds};
+            }
+          } else if (id(pomodoro_state) == ${pomodoro_long_break}) {
+            // Long break finished — full cycle done; back to idle.
+            id(pomodoro_state) = ${pomodoro_idle};
+            id(pomodoro_focus_count) = 0;
+            id(pomodoro_remaining) = 0;
+          } else {
+            // Short break finished — next focus block.
+            id(pomodoro_state) = ${pomodoro_focus};
+            id(pomodoro_remaining) = ${pomodoro_focus_seconds};
+          }
+      - media_player.speaker.play_on_device_media_file:
+          media_file: timer_finished_sound
+          announcement: true
+      - script.execute: draw_display
+
 switch:
   - platform: gpio
     name: Speaker Enable
@@ -584,6 +685,20 @@ switch:
       - switch.turn_off: timer_ringing
 
 select:
+  - platform: template
+    name: "App Mode"
+    id: app_mode
+    icon: "mdi:apps"
+    optimistic: true
+    options:
+      - "Voice"
+      - "Pomodoro"
+    initial_option: "Voice"
+    on_value:
+      - lambda: |-
+          if (x == "Pomodoro") id(app_state) = ${app_pomodoro};
+          else id(app_state) = ${app_voice};
+      - script.execute: draw_display
   - platform: template
     entity_category: config
     name: Wake word engine location
@@ -652,6 +767,26 @@ globals:
     type: int
     restore_value: false
     initial_value: "0"
+  - id: app_state
+    type: int
+    restore_value: true
+    initial_value: ${app_voice}
+  - id: pomodoro_state
+    type: int
+    restore_value: false
+    initial_value: ${pomodoro_idle}
+  - id: pomodoro_remaining
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: pomodoro_focus_count
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: last_touch_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
 
 interval:
   - interval: 80ms
@@ -679,6 +814,30 @@ interval:
           then:
             - lambda: id(frame_tick) += 1;
             - script.execute: draw_display
+  # Pomodoro 1-second tick (only runs while a pomodoro phase is active)
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              int s = id(pomodoro_state);
+              return s == ${pomodoro_focus}
+                  || s == ${pomodoro_short_break}
+                  || s == ${pomodoro_long_break};
+          then:
+            - lambda: id(pomodoro_remaining) -= 1;
+            - if:
+                condition:
+                  lambda: return id(pomodoro_remaining) <= 0;
+                then:
+                  - script.execute: advance_pomodoro
+            - if:
+                condition:
+                  lambda: |-
+                    return id(app_state) == ${app_pomodoro}
+                        && id(voice_assistant_phase) == ${voice_assist_idle_phase_id};
+                then:
+                  - script.execute: draw_display
 
 font:
   - file:
@@ -706,6 +865,13 @@ font:
     size: 30
     glyphsets:
       - ${font_glyphsets}
+  - file:
+      type: gfonts
+      family: ${font_family}
+      weight: 500
+    id: font_pomodoro_big
+    size: 64
+    glyphs: "0123456789:"
 
 text_sensor:
   - id: text_request
@@ -796,8 +962,94 @@ display:
           // Centre core (breathing)
           it.filled_circle(CX, CY, core_r, id(jarvis_cyan_mid));
           it.circle(CX, CY, core_r + 3, id(jarvis_cyan_bright));
+          // Tab strip (top)
+          for (int i = 0; i < ${app_count}; i++) {
+            int dx = 160 - 12 + i * 24;
+            auto col = (i == id(app_state)) ? id(jarvis_cyan_bright) : id(jarvis_cyan_dim);
+            it.filled_circle(dx, 12, 4, col);
+          }
           id(draw_timer_timeline).execute();
           id(draw_active_timer_widget).execute();
+
+      # ----- POMODORO -----
+      - id: pomodoro_page
+        lambda: |-
+          const int CX = 160, CY = 120;
+          int s = id(pomodoro_state);
+          int remaining = id(pomodoro_remaining);
+          int total =
+              (s == ${pomodoro_focus})       ? ${pomodoro_focus_seconds} :
+              (s == ${pomodoro_short_break}) ? ${pomodoro_short_seconds} :
+              (s == ${pomodoro_long_break})  ? ${pomodoro_long_seconds}  :
+              ${pomodoro_focus_seconds};
+          float frac = (s == ${pomodoro_idle}) ? 0.0f
+                     : (1.0f - (float)remaining / (float)total);
+          if (frac < 0) frac = 0;
+          if (frac > 1) frac = 1;
+
+          auto color =
+              (s == ${pomodoro_focus})       ? id(jarvis_cyan_bright) :
+              (s == ${pomodoro_short_break}) ? id(jarvis_cyan_glow)   :
+              (s == ${pomodoro_long_break})  ? id(jarvis_amber)       :
+                                               id(jarvis_cyan_mid);
+
+          it.fill(id(jarvis_bg));
+
+          // Outer progress arc — 60 segments, fills clockwise from top
+          const int N = 60;
+          int filled = (int)(frac * N + 0.5f);
+          for (int i = 0; i < N; i++) {
+            float a = (i / (float)N) * 2.0f * (float)M_PI - (float)M_PI / 2.0f;
+            int x = CX + (int)(108 * cosf(a));
+            int y = CY + (int)(108 * sinf(a));
+            auto seg = (i < filled) ? color : id(jarvis_cyan_dim);
+            it.filled_circle(x, y, 2, seg);
+          }
+          // 12 anchor ticks at major positions
+          for (int i = 0; i < 12; i++) {
+            float a = i * (2.0f * (float)M_PI / 12.0f);
+            int x1 = CX + (int)(94 * cosf(a));
+            int y1 = CY + (int)(94 * sinf(a));
+            int x2 = CX + (int)(100 * cosf(a));
+            int y2 = CY + (int)(100 * sinf(a));
+            it.line(x1, y1, x2, y2, id(jarvis_cyan_dim));
+          }
+
+          // Big MM:SS in centre
+          int m = remaining / 60;
+          int sec = remaining % 60;
+          char buf[16];
+          snprintf(buf, sizeof(buf), "%02d:%02d", m, sec);
+          it.printf(CX, CY - 6, id(font_pomodoro_big), color,
+                    TextAlign::CENTER, "%s", buf);
+
+          // Phase label below MM:SS
+          const char* label =
+              (s == ${pomodoro_focus})       ? "FOCUS" :
+              (s == ${pomodoro_short_break}) ? "BREAK" :
+              (s == ${pomodoro_long_break})  ? "LONG BREAK" :
+                                               "TAP TO START";
+          it.printf(CX, CY + 38, id(font_response), color,
+                    TextAlign::CENTER, "%s", label);
+
+          // Cycle indicator (n/4) when active
+          if (s != ${pomodoro_idle}) {
+            int cur = id(pomodoro_focus_count) +
+                      ((s == ${pomodoro_focus}) ? 1 : 0);
+            if (cur < 1) cur = 1;
+            if (cur > ${pomodoro_cycles_before_long}) cur = ${pomodoro_cycles_before_long};
+            char cyc[8];
+            snprintf(cyc, sizeof(cyc), "%d / %d", cur, ${pomodoro_cycles_before_long});
+            it.printf(CX, 222, id(font_request), id(jarvis_cyan_dim),
+                      TextAlign::BOTTOM_CENTER, "%s", cyc);
+          }
+
+          // Tab strip (top) — shows which app is active
+          for (int i = 0; i < ${app_count}; i++) {
+            int dx = 160 - 12 + i * 24;
+            auto col = (i == id(app_state)) ? id(jarvis_cyan_bright) : id(jarvis_cyan_dim);
+            it.filled_circle(dx, 12, 4, col);
+          }
 
       # ----- LISTENING -----
       - id: listening_page
