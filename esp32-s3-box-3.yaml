@@ -113,6 +113,13 @@ binary_sensor:
     internal: true
     on_press:
       - switch.toggle: mute
+  - platform: gpio
+    pin:
+      number: GPIO21
+      mode: INPUT
+    id: presence_sensor
+    name: "Presence"
+    device_class: occupancy
 
 output:
   - platform: ledc
@@ -133,6 +140,13 @@ i2c:
   - id: i2c_adc_dac
     scl: GPIO18
     sda: GPIO8
+  - id: i2c_dock
+    sda: GPIO41
+    scl: GPIO40
+    scan: false
+    sda_pullup_enabled: true
+    scl_pullup_enabled: true
+    frequency: 100kHz
 
 i2s_audio:
   - id: i2s_audio_bus
@@ -536,6 +550,15 @@ switch:
     restore_mode: RESTORE_DEFAULT_ON
     entity_category: config
     disabled_by_default: true
+  - platform: gpio
+    name: "IR Power"
+    icon: "mdi:led-variant-on"
+    entity_category: config
+    restore_mode: RESTORE_DEFAULT_ON
+    pin:
+      number: GPIO44
+      inverted: true
+    id: ir_power
   - platform: template
     name: Mute
     id: mute
@@ -727,6 +750,61 @@ text_sensor:
           std::string truncated = esphome::str_truncate(name.c_str(),31);
           id(text_response).state = (truncated+"...").c_str();
         }
+
+# ----- Sensor Dock -----
+sensor:
+  - platform: aht10
+    i2c_id: i2c_dock
+    variant: AHT20
+    temperature:
+      name: "Temperature"
+      id: dock_temperature
+    humidity:
+      name: "Humidity"
+      id: dock_humidity
+    update_interval: 60s
+
+  - platform: adc
+    pin: GPIO10
+    name: "Battery Voltage"
+    id: battery_voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    device_class: voltage
+    entity_category: diagnostic
+    update_interval: 30s
+    attenuation: auto
+    filters:
+      - multiply: 4.11
+
+  - platform: copy
+    source_id: battery_voltage
+    name: "Battery Level"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    device_class: battery
+    entity_category: diagnostic
+    filters:
+      - lambda: return (x - 2.7) / (4.2 - 2.7) * 100;
+      - clamp:
+          min_value: 0
+          max_value: 100
+
+remote_receiver:
+  id: ir_rx
+  pin:
+    number: GPIO38
+    inverted: true
+  dump: pronto
+  rmt_symbols: 192
+  buffer_size: 2kb
+
+remote_transmitter:
+  id: ir_tx
+  pin:
+    number: GPIO39
+    inverted: false
+  carrier_duty_percent: 50%
 
 color:
   - id: jarvis_bg
