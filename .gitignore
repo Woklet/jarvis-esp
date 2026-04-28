@@ -1,5 +1,6 @@
 .venv/
 .esphome/
 secrets.yaml
+.mcp.json
 __pycache__/
 .DS_Store

@@ -44,6 +44,7 @@ esphome:
   on_boot:
     priority: 600
     then:
+      - script.execute: check_touchscreen_init
       - script.execute: draw_display
       - delay: 30s
       - if:
@@ -598,6 +599,35 @@ script:
           else:
             - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
 
+  # ----- Touchscreen self-recovery -----
+  # The gt911 occasionally fails to initialize on cold boot. Wait long enough
+  # for setup() to have run, then check is_failed(); if so, reboot once.
+  # tch_recovery_attempted (restore_value: true) prevents an infinite boot loop
+  # on genuinely-broken hardware.
+  - id: check_touchscreen_init
+    then:
+      - delay: 8s
+      - if:
+          condition:
+            lambda: return id(box_touch).is_failed();
+          then:
+            - if:
+                condition:
+                  lambda: return !id(tch_recovery_attempted);
+                then:
+                  - logger.log:
+                      level: WARN
+                      format: "Touchscreen init failed — first recovery attempt, rebooting"
+                  - lambda: id(tch_recovery_attempted) = true;
+                  - delay: 1s
+                  - lambda: App.safe_reboot();
+                else:
+                  - logger.log:
+                      level: ERROR
+                      format: "Touchscreen init failed — recovery already attempted, giving up"
+          else:
+            - lambda: id(tch_recovery_attempted) = false;
+
   # ----- Pomodoro -----
   - id: start_pomodoro
     then:
@@ -810,6 +840,12 @@ globals:
     type: uint32_t
     restore_value: false
     initial_value: "0"
+  # Survives reboot so we don't loop forever if hardware is genuinely broken.
+  # Reset back to false on a successful touchscreen init.
+  - id: tch_recovery_attempted
+    type: bool
+    restore_value: true
+    initial_value: "false"
 
 interval:
   - interval: 80ms
