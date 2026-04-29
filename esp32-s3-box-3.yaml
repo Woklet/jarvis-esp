@@ -50,6 +50,10 @@ substitutions:
   ha_tile_5_label: "EV CHG"
   ha_tile_5_domain: switch
 
+  # Proximity wake — dim backlight after this many seconds without presence.
+  proximity_idle_seconds: "60"
+  proximity_dim_brightness: "0.05"
+
   # Pomodoro state machine
   pomodoro_idle: "0"
   pomodoro_focus: "1"
@@ -183,6 +187,15 @@ binary_sensor:
     id: presence_sensor
     name: "Presence"
     device_class: occupancy
+    on_press:
+      - lambda: id(last_presence_ms) = millis();
+      - script.execute: jarvis_wake
+    on_state:
+      - if:
+          condition:
+            lambda: return x;
+          then:
+            - lambda: id(last_presence_ms) = millis();
 
   # ----- Home Assistant tile state mirrors (Dashboard app) -----
   - platform: homeassistant
@@ -255,6 +268,12 @@ touchscreen:
           uint32_t now = millis();
           if (now - id(last_touch_ms) < 350) return;  // debounce
           id(last_touch_ms) = now;
+          // Any touch counts as presence — wake the screen if it dimmed.
+          id(last_presence_ms) = now;
+          if (id(screen_dim)) {
+            id(jarvis_wake).execute();
+            return;
+          }
           int x = touch.x;
           int y = touch.y;
           // Tab strip area at top: cycle apps
@@ -770,6 +789,31 @@ script:
           announcement: true
       - script.execute: draw_display
 
+  # ----- Proximity wake / ambient dim -----
+  - id: jarvis_wake
+    then:
+      - if:
+          condition:
+            lambda: return id(screen_dim);
+          then:
+            - lambda: id(screen_dim) = false;
+            - light.turn_on:
+                id: led
+                brightness: 100%
+                transition_length: 250ms
+            - script.execute: draw_display
+  - id: jarvis_dim
+    then:
+      - if:
+          condition:
+            lambda: return !id(screen_dim);
+          then:
+            - lambda: id(screen_dim) = true;
+            - light.turn_on:
+                id: led
+                brightness: ${proximity_dim_brightness}
+                transition_length: 1500ms
+
   # ----- Dashboard tile toggle -----
   # Each tile maps to one HA entity; the domain controls which service is
   # called (light.toggle / switch.toggle / input_boolean.toggle / …).
@@ -1014,6 +1058,15 @@ globals:
     type: bool
     restore_value: false
     initial_value: "false"
+  # Proximity-wake state.
+  - id: last_presence_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: screen_dim
+    type: bool
+    restore_value: false
+    initial_value: "false"
 
 interval:
   - interval: 80ms
@@ -1065,6 +1118,27 @@ interval:
                         && id(voice_assistant_phase) == ${voice_assist_idle_phase_id};
                 then:
                   - script.execute: draw_display
+  # Proximity dim — when no presence has been seen for the configured idle
+  # window, ramp the backlight down. Voice phases keep the screen lit.
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              int p = id(voice_assistant_phase);
+              if (p != ${voice_assist_idle_phase_id}
+                  && p != ${voice_assist_muted_phase_id}
+                  && p != ${voice_assist_not_ready_phase_id}) {
+                return false;
+              }
+              if (id(presence_sensor).state) {
+                id(last_presence_ms) = millis();
+                return false;
+              }
+              return (millis() - id(last_presence_ms))
+                  >= (uint32_t)(${proximity_idle_seconds} * 1000);
+          then:
+            - script.execute: jarvis_dim
 
 font:
   - file:
