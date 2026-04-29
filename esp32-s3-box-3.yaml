@@ -15,7 +15,40 @@ substitutions:
   # App state — used when no voice phase is active
   app_voice: "0"
   app_pomodoro: "1"
-  app_count: "2"
+  app_clock: "2"
+  app_weather: "3"
+  app_sys_stats: "4"
+  app_dashboard: "5"
+  app_count: "6"
+
+  # Home Assistant entity ids consumed by the Weather app.
+  # Defaults read everything from a single weather.* entity (state for
+  # condition, "temperature" / "humidity" attributes for the numeric values).
+  ha_weather_entity: weather.forecast_home
+  ha_temperature_entity: weather.forecast_home
+  ha_temperature_attribute: temperature
+  ha_humidity_entity: weather.forecast_home
+  ha_humidity_attribute: humidity
+
+  # Dashboard tiles (2x3 grid). Each pair = entity_id + label shown on tile.
+  ha_tile_0_entity: light.office
+  ha_tile_0_label: "OFFICE"
+  ha_tile_0_domain: light
+  ha_tile_1_entity: light.bedroom
+  ha_tile_1_label: "BEDROOM"
+  ha_tile_1_domain: light
+  ha_tile_2_entity: light.living_room
+  ha_tile_2_label: "LOUNGE"
+  ha_tile_2_domain: light
+  ha_tile_3_entity: light.james
+  ha_tile_3_label: "JAMES"
+  ha_tile_3_domain: light
+  ha_tile_4_entity: light.rach
+  ha_tile_4_label: "RACHEL"
+  ha_tile_4_domain: light
+  ha_tile_5_entity: switch.smart_wi_fi_plug
+  ha_tile_5_label: "EV CHG"
+  ha_tile_5_domain: switch
 
   # Pomodoro state machine
   pomodoro_idle: "0"
@@ -96,6 +129,10 @@ wifi:
 
 captive_portal:
 
+time:
+  - platform: homeassistant
+    id: ha_time
+
 button:
   - platform: factory_reset
     id: factory_reset_btn
@@ -140,6 +177,32 @@ binary_sensor:
     on_press:
       - switch.toggle: mute
 
+  # ----- Home Assistant tile state mirrors (Dashboard app) -----
+  - platform: homeassistant
+    id: ha_tile_0_state
+    entity_id: ${ha_tile_0_entity}
+    internal: true
+  - platform: homeassistant
+    id: ha_tile_1_state
+    entity_id: ${ha_tile_1_entity}
+    internal: true
+  - platform: homeassistant
+    id: ha_tile_2_state
+    entity_id: ${ha_tile_2_entity}
+    internal: true
+  - platform: homeassistant
+    id: ha_tile_3_state
+    entity_id: ${ha_tile_3_entity}
+    internal: true
+  - platform: homeassistant
+    id: ha_tile_4_state
+    entity_id: ${ha_tile_4_entity}
+    internal: true
+  - platform: homeassistant
+    id: ha_tile_5_state
+    entity_id: ${ha_tile_5_entity}
+    internal: true
+
 output:
   - platform: ledc
     pin: GPIO47
@@ -164,7 +227,15 @@ touchscreen:
   - platform: gt911
     i2c_id: i2c_adc_dac
     id: box_touch
-    interrupt_pin: GPIO3
+    interrupt_pin:
+      number: GPIO3
+      ignore_strapping_warning: true
+    # Shared with the display reset; the gt911 component owns the proper
+    # datasheet RESET/INT sequence to deterministically latch the I2C address.
+    reset_pin:
+      number: 48
+      inverted: true
+      allow_other_uses: true
     on_touch:
       - lambda: |-
           uint32_t now = millis();
@@ -180,11 +251,18 @@ touchscreen:
           }
           // App-specific tap actions
           if (id(app_state) == ${app_pomodoro}) {
-            // Tap center: start, pause, or resume
             if (id(pomodoro_state) == ${pomodoro_idle}) {
               id(start_pomodoro).execute();
             } else {
               id(stop_pomodoro).execute();
+            }
+          } else if (id(app_state) == ${app_dashboard}) {
+            // 2x3 tile grid: cols [10..150]/[170..310], rows 35..95/100..160/165..225
+            if (x >= 10 && x <= 310 && y >= 35 && y <= 225) {
+              int col = (x < 160) ? 0 : 1;
+              int row = (y < 100) ? 0 : (y < 165) ? 1 : 2;
+              int idx = row * 2 + col;
+              id(toggle_dashboard_tile).execute(idx);
             }
           }
 
@@ -296,7 +374,9 @@ voice_assistant:
   auto_gain: 31dBFS
   volume_multiplier: 2.0
   on_listening:
-    - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
+    - lambda: |-
+        id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
+        id(vad_active) = false;
     - text_sensor.template.publish:
         id: text_request
         state: "..."
@@ -304,8 +384,12 @@ voice_assistant:
         id: text_response
         state: "..."
     - script.execute: draw_display
+  on_stt_vad_start:
+    - lambda: id(vad_active) = true;
   on_stt_vad_end:
-    - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+    - lambda: |-
+        id(vad_active) = false;
+        id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
     - script.execute: draw_display
   on_stt_end:
     - text_sensor.template.publish:
@@ -433,10 +517,24 @@ script:
                                 id(s3_box_lcd).update();
                                 break;
                               default:
-                                if (id(app_state) == ${app_pomodoro}) {
-                                  id(s3_box_lcd).show_page(pomodoro_page);
-                                } else {
-                                  id(s3_box_lcd).show_page(idle_page);
+                                switch (id(app_state)) {
+                                  case ${app_pomodoro}:
+                                    id(s3_box_lcd).show_page(pomodoro_page);
+                                    break;
+                                  case ${app_clock}:
+                                    id(s3_box_lcd).show_page(clock_page);
+                                    break;
+                                  case ${app_weather}:
+                                    id(s3_box_lcd).show_page(weather_page);
+                                    break;
+                                  case ${app_sys_stats}:
+                                    id(s3_box_lcd).show_page(sys_stats_page);
+                                    break;
+                                  case ${app_dashboard}:
+                                    id(s3_box_lcd).show_page(dashboard_page);
+                                    break;
+                                  default:
+                                    id(s3_box_lcd).show_page(idle_page);
                                 }
                                 id(s3_box_lcd).update();
                             }
@@ -658,6 +756,62 @@ script:
           announcement: true
       - script.execute: draw_display
 
+  # ----- Dashboard tile toggle -----
+  # Each tile maps to one HA entity; the domain controls which service is
+  # called (light.toggle / switch.toggle / input_boolean.toggle / …).
+  - id: toggle_dashboard_tile
+    parameters:
+      idx: int
+    then:
+      - if:
+          condition:
+            lambda: return idx == 0;
+          then:
+            - homeassistant.service:
+                service: ${ha_tile_0_domain}.toggle
+                data:
+                  entity_id: ${ha_tile_0_entity}
+      - if:
+          condition:
+            lambda: return idx == 1;
+          then:
+            - homeassistant.service:
+                service: ${ha_tile_1_domain}.toggle
+                data:
+                  entity_id: ${ha_tile_1_entity}
+      - if:
+          condition:
+            lambda: return idx == 2;
+          then:
+            - homeassistant.service:
+                service: ${ha_tile_2_domain}.toggle
+                data:
+                  entity_id: ${ha_tile_2_entity}
+      - if:
+          condition:
+            lambda: return idx == 3;
+          then:
+            - homeassistant.service:
+                service: ${ha_tile_3_domain}.toggle
+                data:
+                  entity_id: ${ha_tile_3_entity}
+      - if:
+          condition:
+            lambda: return idx == 4;
+          then:
+            - homeassistant.service:
+                service: ${ha_tile_4_domain}.toggle
+                data:
+                  entity_id: ${ha_tile_4_entity}
+      - if:
+          condition:
+            lambda: return idx == 5;
+          then:
+            - homeassistant.service:
+                service: ${ha_tile_5_domain}.toggle
+                data:
+                  entity_id: ${ha_tile_5_entity}
+
 switch:
   - platform: gpio
     name: Speaker Enable
@@ -723,11 +877,19 @@ select:
     options:
       - "Voice"
       - "Pomodoro"
+      - "Clock"
+      - "Weather"
+      - "System Stats"
+      - "Dashboard"
     initial_option: "Voice"
     on_value:
       - lambda: |-
-          if (x == "Pomodoro") id(app_state) = ${app_pomodoro};
-          else id(app_state) = ${app_voice};
+          if      (x == "Pomodoro")     id(app_state) = ${app_pomodoro};
+          else if (x == "Clock")        id(app_state) = ${app_clock};
+          else if (x == "Weather")      id(app_state) = ${app_weather};
+          else if (x == "System Stats") id(app_state) = ${app_sys_stats};
+          else if (x == "Dashboard")    id(app_state) = ${app_dashboard};
+          else                          id(app_state) = ${app_voice};
       - script.execute: draw_display
   - platform: template
     entity_category: config
@@ -823,6 +985,12 @@ globals:
     type: bool
     restore_value: true
     initial_value: "false"
+  # Voice activity detector flag — driven by on_stt_vad_start/end; modulates
+  # the waveform amplitude on the listening page.
+  - id: vad_active
+    type: bool
+    restore_value: false
+    initial_value: "false"
 
 interval:
   - interval: 80ms
@@ -908,6 +1076,29 @@ font:
     id: font_pomodoro_big
     size: 64
     glyphs: "0123456789:"
+  - file:
+      type: gfonts
+      family: ${font_family}
+      weight: 500
+    id: font_clock_big
+    size: 70
+    glyphs: "0123456789:"
+  - file:
+      type: gfonts
+      family: ${font_family}
+      weight: 400
+    id: font_label
+    size: 18
+    glyphsets:
+      - ${font_glyphsets}
+  - file:
+      type: gfonts
+      family: ${font_family}
+      weight: 500
+    id: font_value
+    size: 26
+    glyphsets:
+      - ${font_glyphsets}
 
 text_sensor:
   - id: text_request
@@ -929,6 +1120,34 @@ text_sensor:
           std::string truncated = esphome::str_truncate(name.c_str(),31);
           id(text_response).state = (truncated+"...").c_str();
         }
+
+  # Home Assistant weather condition (state of a weather.* entity)
+  - platform: homeassistant
+    id: ha_weather_condition
+    entity_id: ${ha_weather_entity}
+
+# ----- Device diagnostics (driven by the System Stats app) -----
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_rssi
+    update_interval: 30s
+    entity_category: diagnostic
+  - platform: uptime
+    name: "Uptime"
+    id: device_uptime
+    update_interval: 30s
+    entity_category: diagnostic
+
+  # ----- Home Assistant imports (driven by the Weather app) -----
+  - platform: homeassistant
+    id: ha_temperature
+    entity_id: ${ha_temperature_entity}
+    attribute: ${ha_temperature_attribute}
+  - platform: homeassistant
+    id: ha_humidity
+    entity_id: ${ha_humidity_entity}
+    attribute: ${ha_humidity_attribute}
 
 color:
   - id: jarvis_bg
@@ -972,6 +1191,7 @@ display:
     reset_pin:
       number: 48
       inverted: true
+      allow_other_uses: true
     update_interval: never
     pages:
       # ----- IDLE -----
@@ -998,9 +1218,9 @@ display:
           // Centre core (breathing)
           it.filled_circle(CX, CY, core_r, id(jarvis_cyan_mid));
           it.circle(CX, CY, core_r + 3, id(jarvis_cyan_bright));
-          // Tab strip (top)
+          // Tab strip (top) — centered for any ${app_count}
           for (int i = 0; i < ${app_count}; i++) {
-            int dx = 160 - 12 + i * 24;
+            int dx = 160 - (${app_count} - 1) * 12 + i * 24;
             auto col = (i == id(app_state)) ? id(jarvis_cyan_bright) : id(jarvis_cyan_dim);
             it.filled_circle(dx, 12, 4, col);
           }
@@ -1080,9 +1300,206 @@ display:
                       TextAlign::BOTTOM_CENTER, "%s", cyc);
           }
 
-          // Tab strip (top) — shows which app is active
+          // Tab strip (top) — centered for any ${app_count}
           for (int i = 0; i < ${app_count}; i++) {
-            int dx = 160 - 12 + i * 24;
+            int dx = 160 - (${app_count} - 1) * 12 + i * 24;
+            auto col = (i == id(app_state)) ? id(jarvis_cyan_bright) : id(jarvis_cyan_dim);
+            it.filled_circle(dx, 12, 4, col);
+          }
+
+      # ----- CLOCK -----
+      - id: clock_page
+        lambda: |-
+          const int CX = 160, CY = 120;
+          it.fill(id(jarvis_bg));
+          // Faint horizontal frame lines for a HUD feel
+          it.line(20,  46, 300,  46, id(jarvis_cyan_dim));
+          it.line(20, 178, 300, 178, id(jarvis_cyan_dim));
+          it.filled_rectangle(20,  46,  6, 2, id(jarvis_cyan_bright));
+          it.filled_rectangle(294, 178, 6, 2, id(jarvis_cyan_bright));
+
+          if (id(ha_time).now().is_valid()) {
+            auto now = id(ha_time).now();
+            char hm[8];
+            snprintf(hm, sizeof(hm), "%02d:%02d", now.hour, now.minute);
+            it.printf(CX, CY - 8, id(font_clock_big), id(jarvis_cyan_bright),
+                      TextAlign::CENTER, "%s", hm);
+
+            // Seconds tick under the time (small, dim)
+            char ss[8];
+            snprintf(ss, sizeof(ss), ":%02d", now.second);
+            it.printf(CX + 90, CY + 4, id(font_label), id(jarvis_cyan_mid),
+                      TextAlign::BASELINE_LEFT, "%s", ss);
+
+            char ds[32];
+            now.strftime(ds, sizeof(ds), "%a %d %b %Y");
+            it.printf(CX, CY + 50, id(font_value), id(jarvis_cyan_mid),
+                      TextAlign::CENTER, "%s", ds);
+          } else {
+            it.printf(CX, CY, id(font_value), id(jarvis_cyan_dim),
+                      TextAlign::CENTER, "syncing time…");
+          }
+
+          // Tab strip
+          for (int i = 0; i < ${app_count}; i++) {
+            int dx = 160 - (${app_count} - 1) * 12 + i * 24;
+            auto col = (i == id(app_state)) ? id(jarvis_cyan_bright) : id(jarvis_cyan_dim);
+            it.filled_circle(dx, 12, 4, col);
+          }
+          id(draw_timer_timeline).execute();
+
+      # ----- WEATHER -----
+      - id: weather_page
+        lambda: |-
+          const int CX = 160;
+          it.fill(id(jarvis_bg));
+          // Frame
+          it.rectangle(8, 32, 304, 184, id(jarvis_cyan_dim));
+          it.printf(CX, 44, id(font_label), id(jarvis_cyan_mid),
+                    TextAlign::TOP_CENTER, "WEATHER");
+
+          // Condition (text from weather.* state, e.g. "sunny", "cloudy")
+          std::string cond = id(ha_weather_condition).state;
+          if (cond.empty()) cond = "—";
+          // Title-case-ish: just upper-case for the HUD look
+          for (auto &c : cond) c = (c == '_') ? ' ' : c;
+          it.printf(CX, 78, id(font_value), id(jarvis_cyan_bright),
+                    TextAlign::CENTER, "%s", cond.c_str());
+
+          // Two-column readout: TEMP | HUMIDITY
+          it.line(CX, 110, CX, 196, id(jarvis_cyan_dim));
+
+          char tbuf[16];
+          if (id(ha_temperature).has_state()) {
+            snprintf(tbuf, sizeof(tbuf), "%.1f°", id(ha_temperature).state);
+          } else {
+            snprintf(tbuf, sizeof(tbuf), "—");
+          }
+          it.printf(80, 130, id(font_label), id(jarvis_cyan_mid),
+                    TextAlign::CENTER, "TEMP");
+          it.printf(80, 165, id(font_value), id(jarvis_cyan_bright),
+                    TextAlign::CENTER, "%s", tbuf);
+
+          char hbuf[16];
+          if (id(ha_humidity).has_state()) {
+            snprintf(hbuf, sizeof(hbuf), "%.0f%%", id(ha_humidity).state);
+          } else {
+            snprintf(hbuf, sizeof(hbuf), "—");
+          }
+          it.printf(240, 130, id(font_label), id(jarvis_cyan_mid),
+                    TextAlign::CENTER, "HUMIDITY");
+          it.printf(240, 165, id(font_value), id(jarvis_cyan_bright),
+                    TextAlign::CENTER, "%s", hbuf);
+
+          // Tab strip
+          for (int i = 0; i < ${app_count}; i++) {
+            int dx = 160 - (${app_count} - 1) * 12 + i * 24;
+            auto col = (i == id(app_state)) ? id(jarvis_cyan_bright) : id(jarvis_cyan_dim);
+            it.filled_circle(dx, 12, 4, col);
+          }
+          id(draw_timer_timeline).execute();
+
+      # ----- SYSTEM STATS -----
+      - id: sys_stats_page
+        lambda: |-
+          const int CX = 160;
+          it.fill(id(jarvis_bg));
+          it.printf(CX, 44, id(font_label), id(jarvis_cyan_mid),
+                    TextAlign::TOP_CENTER, "SYSTEM");
+
+          // RSSI as a 5-bar meter + dBm value
+          float rssi = id(wifi_rssi).has_state() ? id(wifi_rssi).state : -100.0f;
+          int bars = 0;
+          if      (rssi >= -55) bars = 5;
+          else if (rssi >= -65) bars = 4;
+          else if (rssi >= -75) bars = 3;
+          else if (rssi >= -85) bars = 2;
+          else if (rssi >= -95) bars = 1;
+          for (int i = 0; i < 5; i++) {
+            int bx = 30 + i * 14;
+            int bh = 6 + i * 4;
+            auto col = (i < bars) ? id(jarvis_cyan_bright) : id(jarvis_cyan_dim);
+            it.filled_rectangle(bx, 110 - bh, 10, bh, col);
+          }
+          char rbuf[24];
+          snprintf(rbuf, sizeof(rbuf), "%d dBm", (int)rssi);
+          it.printf(30,  136, id(font_label), id(jarvis_cyan_mid),
+                    TextAlign::BASELINE_LEFT, "WIFI");
+          it.printf(130, 136, id(font_value), id(jarvis_cyan_bright),
+                    TextAlign::BASELINE_LEFT, "%s", rbuf);
+
+          // Uptime (HH:MM:SS) — read from the uptime sensor
+          uint32_t up = id(device_uptime).has_state()
+                          ? (uint32_t)id(device_uptime).state
+                          : (uint32_t)(millis() / 1000);
+          uint32_t uh = up / 3600;
+          uint32_t um = (up % 3600) / 60;
+          uint32_t us = up % 60;
+          char ubuf[24];
+          snprintf(ubuf, sizeof(ubuf), "%02u:%02u:%02u", uh, um, us);
+          it.printf(30,  170, id(font_label), id(jarvis_cyan_mid),
+                    TextAlign::BASELINE_LEFT, "UPTIME");
+          it.printf(130, 170, id(font_value), id(jarvis_cyan_bright),
+                    TextAlign::BASELINE_LEFT, "%s", ubuf);
+
+          // Free heap in KB
+          size_t heap = esp_get_free_heap_size();
+          char mbuf[24];
+          snprintf(mbuf, sizeof(mbuf), "%u KB", (unsigned)(heap / 1024));
+          it.printf(30,  204, id(font_label), id(jarvis_cyan_mid),
+                    TextAlign::BASELINE_LEFT, "HEAP");
+          it.printf(130, 204, id(font_value), id(jarvis_cyan_bright),
+                    TextAlign::BASELINE_LEFT, "%s", mbuf);
+
+          // Tab strip
+          for (int i = 0; i < ${app_count}; i++) {
+            int dx = 160 - (${app_count} - 1) * 12 + i * 24;
+            auto col = (i == id(app_state)) ? id(jarvis_cyan_bright) : id(jarvis_cyan_dim);
+            it.filled_circle(dx, 12, 4, col);
+          }
+
+      # ----- DASHBOARD -----
+      - id: dashboard_page
+        lambda: |-
+          it.fill(id(jarvis_bg));
+          const char* labels[6] = {
+            "${ha_tile_0_label}", "${ha_tile_1_label}",
+            "${ha_tile_2_label}", "${ha_tile_3_label}",
+            "${ha_tile_4_label}", "${ha_tile_5_label}",
+          };
+          esphome::binary_sensor::BinarySensor* tiles[6] = {
+            id(ha_tile_0_state), id(ha_tile_1_state),
+            id(ha_tile_2_state), id(ha_tile_3_state),
+            id(ha_tile_4_state), id(ha_tile_5_state),
+          };
+          for (int i = 0; i < 6; i++) {
+            int col = i % 2;
+            int row = i / 2;
+            int x = 10 + col * 160;
+            int y = 35 + row * 65;
+            int w = 140, h = 60;
+            bool known = tiles[i]->has_state();
+            bool on    = known && tiles[i]->state;
+            auto frame = on ? id(jarvis_cyan_bright)
+                            : (known ? id(jarvis_cyan_dim) : id(jarvis_gray));
+            auto text  = on ? id(jarvis_white)
+                            : (known ? id(jarvis_cyan_mid) : id(jarvis_gray));
+            it.rectangle(x, y, w, h, frame);
+            if (on) {
+              it.rectangle(x + 1, y + 1, w - 2, h - 2, frame);
+              it.filled_circle(x + 12, y + 12, 3, id(jarvis_cyan_glow));
+            }
+            it.printf(x + w / 2, y + h / 2, id(font_label), text,
+                      TextAlign::CENTER, "%s",
+                      known ? labels[i] : "—");
+            it.printf(x + w / 2, y + h - 6, id(font_request),
+                      on ? id(jarvis_cyan_glow) : id(jarvis_cyan_dim),
+                      TextAlign::BASELINE_CENTER, "%s",
+                      known ? (on ? "ON" : "OFF") : "...");
+          }
+          // Tab strip
+          for (int i = 0; i < ${app_count}; i++) {
+            int dx = 160 - (${app_count} - 1) * 12 + i * 24;
             auto col = (i == id(app_state)) ? id(jarvis_cyan_bright) : id(jarvis_cyan_dim);
             it.filled_circle(dx, 12, 4, col);
           }
@@ -1092,7 +1509,6 @@ display:
         lambda: |-
           const int CX = 160, CY = 120;
           int t = id(frame_tick);
-          int core_r = 22 + (int)(4.0f * sinf(t * 0.6f));
           it.fill(id(jarvis_bg));
           // Bright ring frame
           it.circle(CX, CY, 110, id(jarvis_cyan_bright));
@@ -1107,9 +1523,26 @@ display:
             int y2 = CY + (int)(118 * sinf(a));
             it.line(x1, y1, x2, y2, id(jarvis_cyan_bright));
           }
-          // Pulsing core
-          it.filled_circle(CX, CY, core_r, id(jarvis_cyan_bright));
-          it.filled_circle(CX, CY, core_r - 6, id(jarvis_white));
+          // Voice-activity waveform inside the inner ring. Amplitude swells
+          // when on_stt_vad_start fires and collapses on on_stt_vad_end, so
+          // it mirrors actual speech rather than just animating blindly.
+          float target_amp = id(vad_active) ? 22.0f : 5.0f;
+          // Multiple harmonics give an organic, voice-like profile.
+          for (int xi = -50; xi <= 50; xi += 2) {
+            float ph = t * 0.45f + xi * 0.18f;
+            float s  = sinf(ph) + 0.5f * sinf(ph * 2.3f + 1.1f)
+                     + 0.3f * sinf(ph * 0.7f + 0.4f);
+            int y0 = CY + (int)(target_amp * s * 0.5f);
+            int y1 = CY + (int)(target_amp
+                       * (sinf(ph + 0.18f)
+                          + 0.5f * sinf((ph + 0.18f) * 2.3f + 1.1f)
+                          + 0.3f * sinf((ph + 0.18f) * 0.7f + 0.4f))
+                       * 0.5f);
+            it.line(CX + xi, y0, CX + xi + 2, y1,
+                    id(vad_active) ? id(jarvis_white) : id(jarvis_cyan_glow));
+          }
+          // Static centerline behind the waveform
+          it.line(CX - 50, CY, CX + 50, CY, id(jarvis_cyan_dim));
           // Expanding listen halo (3 rings, growing & fading by phase)
           for (int k = 0; k < 3; k++) {
             int r = 30 + ((t * 4 + k * 14) % 60);
